@@ -1,6 +1,44 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+.ruff_cache/
+
+# Environment
 .env
+
+# Database (large binary files)
 *.duckdb
-*.wal
+*.duckdb.wal
+wal_recovery/
+dashboard_snapshot.json
+
+# Frontend build
+frontend/dist/
+frontend/node_modules/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Temp files
+tmp_*.out
+tmp_*.err
+*.pid
+.backend.pid
+.frontend.pid
+
+# PDFs (generated docs, not source)
+*.pdf
+
+# IDE / Gemini
+.gemini/
+.idea/
+.vscode/
+
+# Root node_modules (if any)
+/node_modules/

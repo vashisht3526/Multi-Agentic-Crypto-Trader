@@ -1,0 +1,39 @@
+# ============================================================
+# Systemd service for the Multi-Agentic Crypto Trader engine
+# Copy to /etc/systemd/system/cryptotrader.service on the VM
+# Then:  sudo systemctl daemon-reload
+#        sudo systemctl enable cryptotrader
+#        sudo systemctl start cryptotrader
+# ============================================================
+
+[Unit]
+Description=Multi-Agentic Crypto Trader Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=azureuser
+WorkingDirectory=/home/azureuser/cryptotrader
+Environment="PATH=/home/azureuser/cryptotrader/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/azureuser/cryptotrader/.venv/bin/python main.py
+
+# Auto-restart on crash, wait 10s before retry
+Restart=always
+RestartSec=10
+
+# Graceful shutdown: send SIGINT (KeyboardInterrupt) first
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cryptotrader
+
+# Resource limits (match B2s/B2as_v2: 4GB RAM)
+MemoryMax=3500M
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target

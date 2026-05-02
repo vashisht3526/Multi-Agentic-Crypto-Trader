@@ -17,9 +17,10 @@ PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from database import FastTickDatabase
-from settings import load_settings
+from engine.database import FastTickDatabase
+from engine.settings import load_settings
 from backend.ws_manager import manager
+import engine.config as C
 
 LOGGER = logging.getLogger(__name__)
 
@@ -362,6 +363,7 @@ async def get_account_summary() -> dict[str, Any]:
         "position_size": round(pos_size, 2),
         "position_size_pct": settings.position_size_pct,
         "currency": "USDT",
+        "current_price": round(last_price, 2) if last_price else 0,
         "realized_pnl": round(realized_pnl, 2),
         "unrealized_pnl": round(total_unrealized, 2),
         "total_pnl": round(realized_pnl + total_unrealized, 2),
@@ -371,6 +373,139 @@ async def get_account_summary() -> dict[str, Any]:
         "win_count": int(perf.get("wins", 0)),
         "loss_count": int(perf.get("losses", 0)),
     }
+
+
+# ── These /api/signals/ routes MUST be before the {signal_id} catch-all ──
+
+@app.get("/api/signals/history-v2")
+async def get_signal_history_v2(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    side: Optional[str] = Query(None, description="LONG or SHORT"),
+    status: Optional[str] = Query(None, description="WIN, LOSS, EXPIRED, OPEN"),
+    session: Optional[str] = Query(None, description="ASIAN, EUROPEAN, US, CLOSING"),
+) -> dict[str, Any]:
+    """Paginated signal history with filters."""
+    if not db:
+        return {"error": "Database not connected"}
+    result = db.list_signal_history_paginated(
+        symbol=settings.symbol,
+        limit=limit,
+        offset=offset,
+        side=side,
+        status=status,
+        session=session,
+        capital_base=_position_size(),
+    )
+    for sig in result.get("signals", []):
+        sig["generated_at"] = _safe_str(sig.get("generated_at"))
+        sig["closed_at"] = _safe_str(sig.get("closed_at"))
+    return result
+
+
+@app.get("/api/signals/missed-profit")
+async def get_missed_profit_signals(
+    limit: int = Query(20, ge=1, le=100),
+) -> list[dict[str, Any]]:
+    """EXPIRED signals where MFE exceeded 2x target distance."""
+    if not db:
+        return []
+    data = db.get_missed_profit_signals(symbol=settings.symbol, limit=limit)
+    for sig in data:
+        sig["generated_at"] = _safe_str(sig.get("generated_at"))
+    return data
+
+
+@app.get("/api/timeframe/bias")
+async def get_timeframe_bias() -> dict[str, Any]:
+    """Return current multi-TF trend alignment data."""
+    try:
+        import engine.analysis.timeframe_analysis as TFA
+        bias = TFA.get_trend_bias()
+        return bias
+    except Exception as e:
+        return {"error": str(e), "daily_bias": "UNKNOWN", "alignment_score": 0.0}
+
+
+@app.get("/api/performance/regime-breakdown")
+async def get_regime_breakdown() -> list[dict[str, Any]]:
+    """Win rate, avg P&L, avg duration grouped by volatility regime."""
+    if not db:
+        return []
+    try:
+        with db._lock:
+            rows = db._conn.execute(
+                """
+                SELECT
+                    volatility_regime_at_entry as regime,
+                    COUNT(*) as total,
+                    SUM(CASE WHEN net_pnl_percent > 0 THEN 1 ELSE 0 END) as wins,
+                    ROUND(AVG(net_pnl_percent) * 100, 4) as avg_net_pnl_pct,
+                    ROUND(AVG(gross_pnl_percent) * 100, 4) as avg_gross_pnl_pct,
+                    ROUND(AVG(DATEDIFF('second', generated_at, closed_at)), 0) as avg_duration_s,
+                    ROUND(AVG(mfe_percent), 4) as avg_mfe,
+                    ROUND(AVG(mae_percent), 4) as avg_mae
+                FROM trade_signals
+                WHERE status IN ('WIN', 'LOSS', 'TREND_REVERSAL')
+                  AND volatility_regime_at_entry IS NOT NULL
+                  AND volatility_regime_at_entry != 'UNKNOWN'
+                GROUP BY volatility_regime_at_entry
+                ORDER BY total DESC
+                """
+            ).fetchall()
+        cols = ["regime", "total", "wins", "avg_net_pnl_pct", "avg_gross_pnl_pct",
+                "avg_duration_s", "avg_mfe", "avg_mae"]
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            d["win_rate"] = round(d["wins"] / d["total"], 4) if d["total"] > 0 else 0
+            result.append(d)
+        return result
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@app.get("/api/signals/trend-reversals")
+async def get_trend_reversal_signals(
+    limit: int = Query(50, ge=1, le=200),
+) -> list[dict[str, Any]]:
+    """Signals closed by TREND_REVERSAL with entry/exit context."""
+    if not db:
+        return []
+    try:
+        with db._lock:
+            rows = db._conn.execute(
+                """
+                SELECT signal_id, generated_at, closed_at, side, entry_price,
+                       close_price, gross_pnl_percent, net_pnl_percent,
+                       alignment_score_at_entry, daily_bias_at_entry,
+                       four_h_structure_at_entry, mfe_percent, mae_percent,
+                       max_unrealized_pnl_percent, drawdown_from_peak_percent,
+                       DATEDIFF('second', generated_at, closed_at) as duration_s
+                FROM trade_signals
+                WHERE status = 'TREND_REVERSAL'
+                ORDER BY closed_at DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+        cols = ["signal_id", "generated_at", "closed_at", "side", "entry_price",
+                "close_price", "gross_pnl_percent", "net_pnl_percent",
+                "alignment_score_at_entry", "daily_bias_at_entry",
+                "four_h_structure_at_entry", "mfe_percent", "mae_percent",
+                "max_unrealized_pnl_percent", "drawdown_from_peak_percent",
+                "duration_s"]
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            d["generated_at"] = _safe_str(d.get("generated_at"))
+            d["closed_at"] = _safe_str(d.get("closed_at"))
+            d["was_profitable"] = (d.get("net_pnl_percent") or 0) > 0
+            d["post_note"] = "GOOD_EARLY_EXIT" if d["was_profitable"] else "LATE_EXIT"
+            result.append(d)
+        return result
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 @app.get("/api/signals/{signal_id}")
@@ -525,7 +660,7 @@ async def close_trades(close_type: str, signal_id: Optional[str] = None):
 
 @app.get("/api/agents/events")
 async def get_agent_events(
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(500, ge=1, le=10000),
 ) -> list[dict[str, Any]]:
     if not db:
         return []
@@ -539,7 +674,7 @@ async def get_agent_events(
 async def get_agent_events_by_run(run_id: str) -> list[dict[str, Any]]:
     if not db:
         return []
-    events = db.list_crew_events(symbol=settings.symbol, run_id=run_id, limit=200)
+    events = db.list_crew_events(symbol=settings.symbol, run_id=run_id, limit=1000)
     for ev in events:
         ev["event_time"] = _safe_str(ev.get("event_time"))
     return events
@@ -557,6 +692,146 @@ async def get_orderflow() -> dict[str, Any]:
         "confidence": analysis.get("confidence"),
         "summary": analysis.get("summary"),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PROFITABILITY OVERHAUL: New Endpoints
+# ══════════════════════════════════════════════════════════════════════
+
+def _lttb_downsample(data: list[dict], target_points: int) -> list[dict]:
+    """
+    Largest Triangle Three Buckets (LTTB) downsampling.
+    Preserves visual shape of the curve while reducing points.
+    """
+    if len(data) <= target_points or target_points < 3:
+        return data
+
+    sampled = [data[0]]  # Always keep first point
+    bucket_size = (len(data) - 2) / (target_points - 2)
+
+    a_idx = 0
+    for i in range(1, target_points - 1):
+        bucket_start = int((i - 1) * bucket_size) + 1
+        bucket_end = int(i * bucket_size) + 1
+        bucket_end = min(bucket_end, len(data) - 1)
+
+        # Next bucket average
+        next_start = int(i * bucket_size) + 1
+        next_end = min(int((i + 1) * bucket_size) + 1, len(data) - 1)
+        avg_y = sum(
+            float(data[j].get("cumulative_net_pnl", 0))
+            for j in range(next_start, next_end + 1)
+        ) / max(next_end - next_start + 1, 1)
+        avg_x = (next_start + next_end) / 2
+
+        # Find point in current bucket with max triangle area
+        max_area = -1
+        best_idx = bucket_start
+        a_y = float(data[a_idx].get("cumulative_net_pnl", 0))
+
+        for j in range(bucket_start, bucket_end + 1):
+            area = abs(
+                (a_idx - avg_x) * (float(data[j].get("cumulative_net_pnl", 0)) - a_y)
+                - (a_idx - j) * (avg_y - a_y)
+            ) * 0.5
+            if area > max_area:
+                max_area = area
+                best_idx = j
+
+        sampled.append(data[best_idx])
+        a_idx = best_idx
+
+    sampled.append(data[-1])  # Always keep last point
+    return sampled
+
+
+@app.get("/api/system/config")
+async def get_system_config() -> dict[str, Any]:
+    """Return active config constants for frontend display."""
+    return {
+        "maker_fee": C.MAKER_FEE,
+        "taker_fee": C.TAKER_FEE,
+        "round_trip_fee": C.ROUND_TRIP_FEE,
+        "round_trip_fee_pct": round(C.ROUND_TRIP_FEE * 100, 4),
+        "min_gross_edge": C.MINIMUM_GROSS_EDGE_PERCENT,
+        "min_gross_edge_pct": round(C.MINIMUM_GROSS_EDGE_PERCENT * 100, 4),
+        "exit_mode": "structural",
+        "trailing_be_atr": C.TRAILING_BE_ATR,
+        "trailing_lock_atr": C.TRAILING_LOCK_ATR,
+        "trailing_follow_atr": C.TRAILING_FOLLOW_ATR,
+        "min_alignment_score": C.MIN_ALIGNMENT_SCORE,
+        "min_adx": C.MIN_ADX_THRESHOLD,
+        "adx_extreme": C.ADX_EXTREME_THRESHOLD,
+        "min_atr_pct": C.MIN_ATR_PERCENT_FOR_TRADE,
+        "max_spread_ticks": C.MAX_SPREAD_TICKS,
+        "nofi_threshold": C.NOFI_COMPOSITE_THRESHOLD,
+        "kelly_cap": C.KELLY_FRACTION_CAP,
+        "max_active_trades": C.MAX_ACTIVE_TRADES,
+        "circuit_breaker_losses": C.CIRCUIT_BREAKER_LOSSES,
+        "daily_loss_stop_pct": C.DAILY_LOSS_STOP_PCT,
+        "trend_reversal_hysteresis": C.TREND_REVERSAL_HYSTERESIS,
+    }
+
+
+@app.get("/api/performance/summary")
+async def get_performance_summary(
+    lookback_days: int = Query(0, ge=0, description="0 = all time"),
+) -> dict[str, Any]:
+    """Extended performance summary with optional lookback."""
+    if not db:
+        return {"error": "Database not connected"}
+    return db.get_performance_summary_with_lookback(
+        symbol=settings.symbol, lookback_days=lookback_days
+    )
+
+
+@app.get("/api/equity-curve")
+async def get_equity_curve(
+    lookback_days: int = Query(0, ge=0, description="0 = all time"),
+    max_points: int = Query(500, ge=50, le=2000, description="LTTB target points"),
+) -> dict[str, Any]:
+    """Full equity curve with LTTB downsampling for large datasets."""
+    if not db:
+        return {"error": "Database not connected"}
+    curve = db.get_equity_curve_full(
+        symbol=settings.symbol, lookback_days=lookback_days
+    )
+    # Serialize datetime objects
+    for pt in curve:
+        pt["point_time"] = _safe_str(pt.get("point_time"))
+
+    total_points = len(curve)
+    if total_points > max_points:
+        curve = _lttb_downsample(curve, max_points)
+        downsampled = True
+    else:
+        downsampled = False
+
+    return {
+        "total_trades": total_points,
+        "displayed_points": len(curve),
+        "downsampled": downsampled,
+        "curve": curve,
+    }
+
+
+@app.get("/api/performance/by-session")
+async def get_performance_by_session() -> list[dict[str, Any]]:
+    """Hourly performance table for session/regime analysis."""
+    if not db:
+        return []
+    data = db.get_hourly_performance_table()
+    for row in data:
+        row["updated_at"] = _safe_str(row.get("updated_at"))
+    return data
+
+
+@app.get("/api/performance/monthly-breakdown")
+async def get_monthly_breakdown() -> list[dict[str, Any]]:
+    """Monthly performance grouped by year-month."""
+    if not db:
+        return []
+    return db.get_monthly_breakdown(symbol=settings.symbol)
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────
@@ -601,12 +876,34 @@ async def _broadcast_loop() -> None:
             for ev in events:
                 ev["event_time"] = _safe_str(ev.get("event_time"))
 
+            # Profitability overhaul: enrich broadcast with L2 + session + regime
+            try:
+                from engine.data.binance_ingestor import l2_cache, funding_cache
+                from engine.analysis.technical_math import fetch_macro_indicators
+                l2_data = {
+                    "spread_ticks": l2_cache.get("spread_ticks", 0),
+                    "obi": l2_cache.get("obi_0_1pct", 0),
+                    "funding_rate": funding_cache.get("current", 0),
+                    "best_bid": l2_cache.get("best_bid", 0),
+                    "best_ask": l2_cache.get("best_ask", 0),
+                }
+                session_tag = db.get_session_tag()
+            except Exception:
+                l2_data = {}
+                session_tag = "UNKNOWN"
+
             await manager.broadcast({
                 "type": "update",
                 "timestamp": datetime.utcnow().isoformat(),
                 "last_price": last_price,
                 "active_signals": enriched,
                 "recent_events": events,
+                "current_l2": l2_data,
+                "session_tag": session_tag,
+                "config": {
+                    "round_trip_fee_pct": round(C.ROUND_TRIP_FEE * 100, 4),
+                    "min_edge_pct": round(C.MINIMUM_GROSS_EDGE_PERCENT * 100, 4),
+                },
             })
         except Exception:
             LOGGER.debug("Broadcast loop error", exc_info=True)

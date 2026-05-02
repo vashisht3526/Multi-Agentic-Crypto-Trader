@@ -234,6 +234,101 @@ class FastTickDatabase:
                 ADD COLUMN IF NOT EXISTS challenge_summary VARCHAR
                 """
             )
+            # ── Profitability Overhaul: New columns on trade_signals ──
+            for col_def in [
+                "mfe_percent DOUBLE DEFAULT 0",
+                "mae_percent DOUBLE DEFAULT 0",
+                "session_tag VARCHAR DEFAULT 'UNKNOWN'",
+                "funding_rate_at_entry DOUBLE DEFAULT 0",
+                "obi_at_entry DOUBLE DEFAULT 0",
+                "spread_at_entry DOUBLE DEFAULT 0",
+                "gross_pnl_percent DOUBLE DEFAULT 0",
+                "net_pnl_percent DOUBLE DEFAULT 0",
+                "latency_ms INTEGER DEFAULT 0",
+                "kelly_fraction_used DOUBLE DEFAULT 0",
+                "nofi_at_entry DOUBLE DEFAULT 0",
+                "atr_used DOUBLE DEFAULT 0",
+            ]:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS {col_def}"
+                    )
+                except Exception:
+                    pass  # Column exists or dependency prevents alter
+            # ── Multi-TF Trend-Capture: New columns on trade_signals ──
+            for col_def in [
+                "alignment_score_at_entry DOUBLE DEFAULT 0",
+                "daily_bias_at_entry VARCHAR DEFAULT 'UNKNOWN'",
+                "four_h_structure_at_entry VARCHAR DEFAULT 'UNKNOWN'",
+                "pullback_complete_at_entry BOOLEAN DEFAULT FALSE",
+                "volatility_regime_at_entry VARCHAR DEFAULT 'UNKNOWN'",
+                "tp_multiplier_used DOUBLE DEFAULT 3.0",
+                "sl_multiplier_used DOUBLE DEFAULT 1.0",
+                "max_unrealized_pnl_percent DOUBLE DEFAULT 0",
+                "drawdown_from_peak_percent DOUBLE DEFAULT 0",
+                "exit_reason VARCHAR DEFAULT ''",
+                "trend_fail_count INTEGER DEFAULT 0",
+                "partial_tp_taken BOOLEAN DEFAULT FALSE",
+            ]:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS {col_def}"
+                    )
+                except Exception:
+                    pass  # Column exists or dependency prevents alter
+            # ── Profitability Overhaul: hourly_performance table ──
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hourly_performance (
+                    hour_utc INTEGER NOT NULL,
+                    side VARCHAR NOT NULL,
+                    regime VARCHAR NOT NULL,
+                    total_signals INTEGER DEFAULT 0,
+                    wins INTEGER DEFAULT 0,
+                    losses INTEGER DEFAULT 0,
+                    avg_mfe DOUBLE DEFAULT 0,
+                    avg_mae DOUBLE DEFAULT 0,
+                    win_rate DOUBLE DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (hour_utc, side, regime)
+                )
+                """
+            )
+            # Add avg_duration_seconds if not exists
+            try:
+                self._conn.execute(
+                    "ALTER TABLE hourly_performance ADD COLUMN IF NOT EXISTS avg_duration_seconds DOUBLE DEFAULT 0"
+                )
+            except Exception:
+                pass
+            # ── Multi-TF Trend-Capture: regime_log table ──
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS regime_log (
+                    week_starting DATE,
+                    regime VARCHAR,
+                    signals_count INTEGER DEFAULT 0,
+                    missed_profits_count INTEGER DEFAULT 0,
+                    quick_stops_count INTEGER DEFAULT 0,
+                    tp_multiplier DOUBLE DEFAULT 3.0,
+                    sl_multiplier DOUBLE DEFAULT 1.0
+                )
+                """
+            )
+            # ── Profitability Overhaul: l2_snapshots table ──
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS l2_snapshots (
+                    snapshot_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    bid_0 DOUBLE,
+                    ask_0 DOUBLE,
+                    bid_vol_0_1pct DOUBLE,
+                    ask_vol_0_1pct DOUBLE,
+                    obi_0_1pct DOUBLE,
+                    spread_ticks DOUBLE
+                )
+                """
+            )
             self._conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_ticks_symbol_time
@@ -400,7 +495,7 @@ class FastTickDatabase:
     def list_crew_events(
         self,
         symbol: str,
-        limit: int = 200,
+        limit: int = 500,
         run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         if run_id:
@@ -2358,6 +2453,521 @@ class FastTickDatabase:
             "avg_pnl_pct": round(float(row[7] or 0.0), 4),
         }
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PROFITABILITY OVERHAUL: New Methods
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    @staticmethod
+    def get_session_tag(utc_hour: int | None = None) -> str:
+        """Returns session tag based on UTC hour."""
+        if utc_hour is None:
+            utc_hour = datetime.utcnow().hour
+        if 0 <= utc_hour < 8:
+            return "ASIAN"
+        elif 8 <= utc_hour < 13:
+            return "EUROPEAN"
+        elif 13 <= utc_hour < 21:
+            return "US"
+        else:
+            return "CLOSING"
+
+    def get_regime_performance(
+        self, session: str, side: str, adx: float
+    ) -> dict[str, Any]:
+        """Query hourly_performance for a given session, side, and regime."""
+        regime = "TRENDING" if adx >= 25 else "RANGING"
+        # Map session to hour range
+        session_hours = {
+            "ASIAN": list(range(0, 8)),
+            "EUROPEAN": list(range(8, 13)),
+            "US": list(range(13, 21)),
+            "CLOSING": list(range(21, 24)),
+        }
+        hours = session_hours.get(session.upper(), list(range(0, 24)))
+        placeholders = ",".join(["?"] * len(hours))
+
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT
+                    COALESCE(SUM(total_signals), 0),
+                    COALESCE(SUM(wins), 0),
+                    COALESCE(SUM(losses), 0),
+                    COALESCE(AVG(avg_mfe), 0),
+                    COALESCE(AVG(avg_mae), 0)
+                FROM hourly_performance
+                WHERE side = ? AND regime = ?
+                  AND hour_utc IN ({placeholders})
+                """,
+                [side.upper(), regime] + hours,
+            ).fetchone()
+
+        if not row or int(row[0]) == 0:
+            return {
+                "win_rate": 0.5,
+                "avg_mfe": 0.0,
+                "avg_mae": 0.0,
+                "total_signals": 0,
+                "regime": regime,
+            }
+        total = int(row[0])
+        wins = int(row[1])
+        return {
+            "win_rate": wins / total if total > 0 else 0.5,
+            "avg_mfe": float(row[3]),
+            "avg_mae": float(row[4]),
+            "total_signals": total,
+            "regime": regime,
+        }
+
+    def update_hourly_performance(self, signal_data: dict[str, Any]) -> None:
+        """Upsert hourly_performance on trade close."""
+        hour_utc = signal_data.get("hour_utc", datetime.utcnow().hour)
+        side = str(signal_data.get("side", "UNKNOWN")).upper()
+        regime = str(signal_data.get("regime", "UNKNOWN")).upper()
+        is_win = signal_data.get("status", "") == "WIN"
+        mfe = float(signal_data.get("mfe_percent", 0))
+        mae = float(signal_data.get("mae_percent", 0))
+
+        with self._lock:
+            existing = self._conn.execute(
+                """
+                SELECT total_signals, wins, losses, avg_mfe, avg_mae
+                FROM hourly_performance
+                WHERE hour_utc = ? AND side = ? AND regime = ?
+                """,
+                [hour_utc, side, regime],
+            ).fetchone()
+
+            if existing:
+                total = int(existing[0]) + 1
+                wins = int(existing[1]) + (1 if is_win else 0)
+                losses = int(existing[2]) + (0 if is_win else 1)
+                # Running average for MFE/MAE
+                old_mfe = float(existing[3])
+                old_mae = float(existing[4])
+                new_avg_mfe = (old_mfe * (total - 1) + mfe) / total
+                new_avg_mae = (old_mae * (total - 1) + mae) / total
+                win_rate = wins / total if total > 0 else 0.0
+
+                self._conn.execute(
+                    """
+                    UPDATE hourly_performance
+                    SET total_signals = ?, wins = ?, losses = ?,
+                        avg_mfe = ?, avg_mae = ?, win_rate = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE hour_utc = ? AND side = ? AND regime = ?
+                    """,
+                    [total, wins, losses, new_avg_mfe, new_avg_mae,
+                     win_rate, hour_utc, side, regime],
+                )
+            else:
+                win_rate = 1.0 if is_win else 0.0
+                self._conn.execute(
+                    """
+                    INSERT INTO hourly_performance
+                        (hour_utc, side, regime, total_signals, wins, losses,
+                         avg_mfe, avg_mae, win_rate)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    """,
+                    [hour_utc, side, regime,
+                     1 if is_win else 0, 0 if is_win else 1,
+                     mfe, mae, win_rate],
+                )
+
+    def batch_insert_l2_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
+        """Bulk insert L2 depth snapshots."""
+        if not snapshots:
+            return
+        with self._lock:
+            for snap in snapshots:
+                self._conn.execute(
+                    """
+                    INSERT INTO l2_snapshots
+                        (bid_0, ask_0, bid_vol_0_1pct, ask_vol_0_1pct,
+                         obi_0_1pct, spread_ticks)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        snap.get("best_bid", 0),
+                        snap.get("best_ask", 0),
+                        snap.get("bid_vol_0_1pct", 0),
+                        snap.get("ask_vol_0_1pct", 0),
+                        snap.get("obi_0_1pct", 0),
+                        snap.get("spread_ticks", 0),
+                    ],
+                )
+
+    def get_recent_signals_in_window(
+        self, symbol: str, seconds: int, side: str
+    ) -> list[dict[str, Any]]:
+        """Check for recent signals within a time window for clustering prevention."""
+        threshold = datetime.utcnow() - timedelta(seconds=seconds)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT signal_id, generated_at, side, status
+                FROM trade_signals
+                WHERE symbol = ? AND side = ? AND generated_at >= ?
+                  AND status IN ('OPEN', 'PENDING_VALIDATION')
+                ORDER BY generated_at DESC
+                """,
+                [symbol, side.upper(), threshold],
+            ).fetchall()
+        return [
+            {
+                "signal_id": str(row[0]),
+                "generated_at": row[1],
+                "side": str(row[2]),
+                "status": str(row[3]),
+            }
+            for row in rows
+        ]
+
+    def get_hourly_performance_table(self) -> list[dict[str, Any]]:
+        """Returns hourly_performance table ordered by hour_utc."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT hour_utc, side, regime, total_signals, wins, losses,
+                       avg_mfe, avg_mae, win_rate, updated_at
+                FROM hourly_performance
+                ORDER BY hour_utc ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "hour_utc": int(row[0]),
+                "side": str(row[1]),
+                "regime": str(row[2]),
+                "total_signals": int(row[3]),
+                "wins": int(row[4]),
+                "losses": int(row[5]),
+                "avg_mfe": round(float(row[6]), 4),
+                "avg_mae": round(float(row[7]), 4),
+                "win_rate": round(float(row[8]), 4),
+                "updated_at": row[9],
+            }
+            for row in rows
+        ]
+
+    def get_missed_profit_signals(
+        self, symbol: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Query EXPIRED signals where MFE exceeded 2x target distance."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT signal_id, generated_at, side, entry_price, take_profit,
+                       mfe_percent, mae_percent, session_tag,
+                       gross_pnl_percent, net_pnl_percent
+                FROM trade_signals
+                WHERE symbol = ?
+                  AND status = 'EXPIRED'
+                  AND mfe_percent > 0.005
+                  AND mfe_percent > 2 * ABS(
+                      CASE WHEN side = 'LONG'
+                           THEN (take_profit - entry_price) / entry_price
+                           ELSE (entry_price - take_profit) / entry_price
+                      END
+                  )
+                ORDER BY mfe_percent DESC
+                LIMIT ?
+                """,
+                [symbol, max(limit, 1)],
+            ).fetchall()
+        return [
+            {
+                "signal_id": str(row[0]),
+                "generated_at": row[1],
+                "side": str(row[2]),
+                "entry_price": float(row[3]),
+                "take_profit": float(row[4]),
+                "mfe_percent": round(float(row[5]), 4),
+                "mae_percent": round(float(row[6]), 4),
+                "session_tag": str(row[7]),
+                "gross_pnl_percent": round(float(row[8] or 0), 4),
+                "net_pnl_percent": round(float(row[9] or 0), 4),
+            }
+            for row in rows
+        ]
+
+    def get_performance_summary_with_lookback(
+        self, symbol: str, lookback_days: int = 0
+    ) -> dict[str, Any]:
+        """Extended performance summary with optional lookback period.
+        lookback_days=0 means ALL TIME.
+        """
+        date_filter = ""
+        params: list[Any] = [symbol]
+        if lookback_days > 0:
+            threshold = datetime.utcnow() - timedelta(days=lookback_days)
+            date_filter = " AND COALESCE(closed_at, generated_at) >= ?"
+            params.append(threshold)
+
+        with self._lock:
+            row = self._conn.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total_signals,
+                    SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status = 'LOSS' THEN 1 ELSE 0 END) AS losses,
+                    SUM(CASE WHEN status = 'EXPIRED' THEN 1 ELSE 0 END) AS expired,
+                    SUM(COALESCE(gross_pnl_percent, 0)) AS total_gross_pnl,
+                    SUM(COALESCE(net_pnl_percent, 0)) AS total_net_pnl,
+                    AVG(CASE WHEN status = 'WIN' THEN net_pnl_percent END) AS avg_win,
+                    AVG(CASE WHEN status = 'LOSS' THEN net_pnl_percent END) AS avg_loss,
+                    SUM(CASE WHEN status = 'WIN' THEN gross_pnl_percent ELSE 0 END) AS gross_wins,
+                    SUM(CASE WHEN status = 'LOSS' THEN ABS(gross_pnl_percent) ELSE 0 END) AS gross_losses
+                FROM trade_signals
+                WHERE symbol = ?
+                  AND side IN ('LONG', 'SHORT')
+                  AND status IN ('WIN', 'LOSS', 'EXPIRED')
+                  {date_filter}
+                """,
+                params,
+            ).fetchone()
+
+        if not row or int(row[0] or 0) == 0:
+            return {
+                "total_signals": 0, "win_count": 0, "loss_count": 0,
+                "expired_count": 0, "gross_win_rate": 0.0, "net_win_rate": 0.0,
+                "total_gross_pnl_percent": 0.0, "total_net_pnl_percent": 0.0,
+                "avg_win_percent": 0.0, "avg_loss_percent": 0.0,
+                "profit_factor": 0.0, "expectancy_per_trade": 0.0,
+            }
+
+        total = int(row[0])
+        wins = int(row[1] or 0)
+        losses = int(row[2] or 0)
+        expired = int(row[3] or 0)
+        decisive = wins + losses
+        gross_win_rate = wins / decisive if decisive > 0 else 0.0
+        avg_win = float(row[6] or 0.0)
+        avg_loss = float(row[7] or 0.0)
+        gross_wins_total = float(row[8] or 0.0)
+        gross_losses_total = float(row[9] or 0.0)
+        profit_factor = (
+            gross_wins_total / gross_losses_total
+            if gross_losses_total > 0 else 0.0
+        )
+        loss_rate = 1 - gross_win_rate
+        expectancy = (gross_win_rate * avg_win) - (loss_rate * abs(avg_loss))
+
+        # Net win rate (wins where net_pnl > 0)
+        net_wins_row = self._conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM trade_signals
+            WHERE symbol = ?
+              AND side IN ('LONG', 'SHORT')
+              AND status IN ('WIN', 'LOSS', 'EXPIRED')
+              AND net_pnl_percent > 0
+              {date_filter}
+            """,
+            params,
+        ).fetchone()
+        net_wins = int(net_wins_row[0] or 0) if net_wins_row else 0
+        net_win_rate = net_wins / decisive if decisive > 0 else 0.0
+
+        return {
+            "total_signals": total,
+            "win_count": wins,
+            "loss_count": losses,
+            "expired_count": expired,
+            "gross_win_rate": round(gross_win_rate, 4),
+            "net_win_rate": round(net_win_rate, 4),
+            "total_gross_pnl_percent": round(float(row[4] or 0), 6),
+            "total_net_pnl_percent": round(float(row[5] or 0), 6),
+            "avg_win_percent": round(avg_win, 6),
+            "avg_loss_percent": round(avg_loss, 6),
+            "profit_factor": round(profit_factor, 4),
+            "expectancy_per_trade": round(expectancy, 6),
+        }
+
+    def get_equity_curve_full(
+        self, symbol: str, lookback_days: int = 0
+    ) -> list[dict[str, Any]]:
+        """Full equity curve from ALL closed trades. No LIMIT."""
+        date_filter = ""
+        params: list[Any] = [symbol]
+        if lookback_days > 0:
+            threshold = datetime.utcnow() - timedelta(days=lookback_days)
+            date_filter = " AND COALESCE(closed_at, generated_at) >= ?"
+            params.append(threshold)
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT signal_id,
+                       COALESCE(closed_at, generated_at) AS point_time,
+                       status, net_pnl_percent, gross_pnl_percent
+                FROM trade_signals
+                WHERE symbol = ?
+                  AND side IN ('LONG', 'SHORT')
+                  AND status IN ('WIN', 'LOSS', 'EXPIRED', 'NO_DATA')
+                  {date_filter}
+                ORDER BY point_time ASC
+                """,
+                params,
+            ).fetchall()
+
+        cumulative_net = 0.0
+        cumulative_gross = 0.0
+        peak = 0.0
+        curve: list[dict[str, Any]] = []
+        for row in rows:
+            net_pnl = float(row[3] or 0.0)
+            gross_pnl = float(row[4] or 0.0)
+            cumulative_net += net_pnl
+            cumulative_gross += gross_pnl
+            peak = max(peak, cumulative_net)
+            drawdown = cumulative_net - peak
+
+            curve.append({
+                "signal_id": str(row[0]),
+                "point_time": row[1],
+                "status": str(row[2]),
+                "net_pnl_percent": round(net_pnl, 6),
+                "gross_pnl_percent": round(gross_pnl, 6),
+                "cumulative_net_pnl": round(cumulative_net, 6),
+                "cumulative_gross_pnl": round(cumulative_gross, 6),
+                "drawdown_percent": round(drawdown, 6),
+            })
+        return curve
+
+    def get_monthly_breakdown(self, symbol: str) -> list[dict[str, Any]]:
+        """Monthly performance breakdown for calendar heatmap."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    strftime(COALESCE(closed_at, generated_at), '%Y-%m') AS ym,
+                    COUNT(*) AS signals,
+                    SUM(COALESCE(net_pnl_percent, 0)) AS net_pnl,
+                    SUM(CASE WHEN status = 'WIN' THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN status = 'LOSS' THEN 1 ELSE 0 END) AS losses
+                FROM trade_signals
+                WHERE symbol = ?
+                  AND side IN ('LONG', 'SHORT')
+                  AND status IN ('WIN', 'LOSS', 'EXPIRED')
+                GROUP BY ym
+                ORDER BY ym ASC
+                """,
+                [symbol],
+            ).fetchall()
+        result = []
+        for row in rows:
+            decisive = int(row[3] or 0) + int(row[4] or 0)
+            result.append({
+                "year_month": str(row[0]),
+                "signals": int(row[1]),
+                "net_pnl_percent": round(float(row[2] or 0), 6),
+                "win_rate": round(int(row[3] or 0) / decisive, 4) if decisive > 0 else 0.0,
+                "wins": int(row[3] or 0),
+                "losses": int(row[4] or 0),
+            })
+        return result
+
+    def list_signal_history_paginated(
+        self,
+        symbol: str,
+        limit: int = 100,
+        offset: int = 0,
+        side: str | None = None,
+        status: str | None = None,
+        session: str | None = None,
+        capital_base: float = 100000.0,
+    ) -> dict[str, Any]:
+        """Paginated signal history with filters."""
+        conditions = ["symbol = ?", "side IN ('LONG', 'SHORT')"]
+        params: list[Any] = [symbol]
+
+        if side:
+            conditions.append("side = ?")
+            params.append(side.upper())
+        if status:
+            conditions.append("status = ?")
+            params.append(status.upper())
+        if session:
+            conditions.append("session_tag = ?")
+            params.append(session.upper())
+
+        where_clause = " AND ".join(conditions)
+
+        with self._lock:
+            # Get total count
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) FROM trade_signals WHERE {where_clause}",
+                params,
+            ).fetchone()
+            total_count = int(count_row[0]) if count_row else 0
+
+            # Get paginated results
+            rows = self._conn.execute(
+                f"""
+                SELECT signal_id, generated_at, closed_at, side, regime,
+                       entry_price, close_price, stop_price, take_profit,
+                       confidence, status, pnl_pct,
+                       COALESCE(challenge_verdict, 'PENDING') AS challenge_verdict,
+                       outcome_reason, rationale,
+                       mfe_percent, mae_percent, session_tag,
+                       funding_rate_at_entry, spread_at_entry,
+                       gross_pnl_percent, net_pnl_percent,
+                       alignment_score_at_entry, exit_reason,
+                       max_unrealized_pnl_percent, volatility_regime_at_entry
+                FROM trade_signals
+                WHERE {where_clause}
+                ORDER BY COALESCE(closed_at, generated_at) DESC
+                LIMIT ? OFFSET ?
+                """,
+                params + [min(limit, 1000), max(offset, 0)],
+            ).fetchall()
+
+        signals = []
+        for row in rows:
+            pnl_pct = float(row[11] or 0.0)
+            net_pnl = float(row[21] or 0.0)
+            pos_size = float(capital_base)
+            signals.append({
+                "signal_id": str(row[0]),
+                "generated_at": row[1],
+                "closed_at": row[2],
+                "side": str(row[3]),
+                "regime": str(row[4]),
+                "entry_price": float(row[5]),
+                "close_price": float(row[6]) if row[6] else None,
+                "stop_price": float(row[7]),
+                "take_profit": float(row[8]),
+                "confidence": round(float(row[9]), 4),
+                "status": str(row[10]),
+                "pnl_pct": round(pnl_pct, 4),
+                "challenge_verdict": str(row[12]),
+                "outcome_reason": str(row[13]) if row[13] else None,
+                "rationale": str(row[14]),
+                "mfe_percent": round(float(row[15] or 0), 4),
+                "mae_percent": round(float(row[16] or 0), 4),
+                "session_tag": str(row[17] or "UNKNOWN"),
+                "funding_rate_at_entry": round(float(row[18] or 0), 6),
+                "spread_at_entry": round(float(row[19] or 0), 2),
+                "gross_pnl_percent": round(float(row[20] or 0), 4),
+                "net_pnl_percent": round(net_pnl, 4),
+                "alignment_score_at_entry": round(float(row[22] or 0), 2),
+                "exit_reason": str(row[23] or ""),
+                "max_unrealized_pnl_percent": round(float(row[24] or 0), 4),
+                "volatility_regime_at_entry": str(row[25] or ""),
+                "capital_base": round(float(capital_base), 2),
+                "position_size_usd": round(pos_size, 2),
+                "capital_pnl": round(pos_size * net_pnl, 2) if net_pnl else round(pos_size * pnl_pct, 2),
+            })
+        return {
+            "signals": signals,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+

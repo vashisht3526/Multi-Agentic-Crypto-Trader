@@ -11,10 +11,11 @@ import time
 
 import duckdb
 import uvicorn
-from binance_ingestor import BinanceTickIngestionAgent
-from backbone import HierarchicalBackbone
-from database import FastTickDatabase
-from settings import Settings, load_settings
+from engine.data.binance_ingestor import BinanceTickIngestionAgent, run_l2_depth_stream, run_funding_rate_poller
+from engine.backbone import HierarchicalBackbone
+from engine.database import FastTickDatabase
+from engine.settings import Settings, load_settings
+import engine.config as C
 
 
 LOGGER = logging.getLogger(__name__)
@@ -228,13 +229,16 @@ async def dashboard_snapshot_loop(
 async def trade_reaper_loop(
     db: FastTickDatabase,
     symbol: str,
-    horizon_seconds: int,
-    check_interval_seconds: int = 2,
+    check_interval_seconds: float = 1.0,
 ) -> None:
     """
-    Background evaluator: checks all OPEN trades for TP/SL hits or time expirations.
-    Runs every `check_interval_seconds`. NEVER fails silently.
+    Structural exit evaluator. No time-based expiry.
+    Runs every 1s. 3-tier trailing stop. Trend reversal with hysteresis.
     """
+    import engine.analysis.timeframe_analysis as TFA
+
+    _last_trend_check: float = 0.0  # monotonic time of last trend check
+
     while True:
         try:
             now = datetime.utcnow()
@@ -246,7 +250,10 @@ async def trade_reaper_loop(
             with db._lock:
                 open_trades = db._conn.execute(
                     """
-                    SELECT signal_id, generated_at, side, entry_price, stop_price, take_profit, decision_trace_json
+                    SELECT signal_id, generated_at, side, entry_price, stop_price,
+                           take_profit, decision_trace_json, mfe_percent, mae_percent,
+                           regime, atr_used, trend_fail_count,
+                           max_unrealized_pnl_percent
                     FROM trade_signals
                     WHERE symbol = ? AND status = 'OPEN'
                     """,
@@ -254,6 +261,12 @@ async def trade_reaper_loop(
                 ).fetchall()
 
             closed_any = False
+            now_mono = time.monotonic()
+            do_trend_check = (now_mono - _last_trend_check) >= C.TREND_REVERSAL_CHECK_INTERVAL
+
+            if do_trend_check:
+                _last_trend_check = now_mono
+
             for row in open_trades:
                 signal_id = str(row[0])
                 generated_at = row[1]
@@ -261,76 +274,242 @@ async def trade_reaper_loop(
                 entry_price = float(row[3])
                 stop_price = float(row[4])
                 take_profit = float(row[5])
-                
-                # Dynamic BE trailing logic
+                current_mfe = float(row[7] or 0)
+                current_mae = float(row[8] or 0)
+                regime = str(row[9] or "UNKNOWN")
+                atr_used = float(row[10] or 0)
+                trend_fail_count = int(row[11] or 0)
+                max_unrealized = float(row[12] or 0)
+
                 try:
                     trace_data = json.loads(row[6]) if row[6] else {}
                 except Exception:
                     trace_data = {}
-                
-                atr_1 = 0.0
-                if "targets" in trace_data and "atr_dollar" in trace_data["targets"]:
-                    atr_1 = float(trace_data["targets"]["atr_dollar"]) * (3 ** 0.5)
-                
-                if atr_1 <= 0:
-                    sl_mult = float(trace_data.get("targets", {}).get("sl_multiplier", 1.2))
+
+                # ── ATR recovery ──
+                atr_dollar = atr_used
+                if atr_dollar <= 0 and "targets" in trace_data:
+                    atr_dollar = float(trace_data["targets"].get("atr_dollar", 0))
+                if atr_dollar <= 0:
+                    sl_mult = float(trace_data.get("targets", {}).get("sl_multiplier", 1.0))
                     risk_dist = abs(entry_price - stop_price)
-                    atr_1 = risk_dist / sl_mult if sl_mult > 0 else 0
+                    atr_dollar = risk_dist / sl_mult if sl_mult > 0 else 0
 
-                duration_s = (now - generated_at).total_seconds()
-                is_expired = duration_s >= horizon_seconds
+                duration_s = (now - generated_at).total_seconds() if generated_at else 0
 
-                trigger_reason = None
-                end_status = "EXPIRED"
+                # ── Continuous MFE/MAE tracking ──
+                if side == "LONG":
+                    current_excursion = ((close_price - entry_price) / entry_price) * 100
+                elif side == "SHORT":
+                    current_excursion = ((entry_price - close_price) / entry_price) * 100
+                else:
+                    current_excursion = 0.0
 
-                # Check trailing break-even trigger
-                be_moved = False
-                if side == "LONG" and stop_price != entry_price and atr_1 > 0:
-                    if close_price >= entry_price + atr_1:
-                        stop_price = entry_price
-                        be_moved = True
-                elif side == "SHORT" and stop_price != entry_price and atr_1 > 0:
-                    if close_price <= entry_price - atr_1:
-                        stop_price = entry_price
-                        be_moved = True
+                new_mfe = max(current_mfe, current_excursion)
+                new_mae = min(current_mae, current_excursion)
 
-                if be_moved:
+                # Track max unrealized and drawdown from peak
+                new_max_unrealized = max(max_unrealized, current_excursion)
+                drawdown_from_peak = new_max_unrealized - current_excursion
+
+                # Update MFE/MAE + peak tracking on every tick
+                if (new_mfe != current_mfe or new_mae != current_mae
+                        or new_max_unrealized != max_unrealized):
+                    with db._lock:
+                        db._conn.execute(
+                            """UPDATE trade_signals SET
+                                mfe_percent = ?, mae_percent = ?,
+                                max_unrealized_pnl_percent = ?,
+                                drawdown_from_peak_percent = ?
+                            WHERE signal_id = ?""",
+                            [round(new_mfe, 6), round(new_mae, 6),
+                             round(new_max_unrealized, 6), round(drawdown_from_peak, 6),
+                             signal_id],
+                        )
+
+                # ══════════════════════════════════════════════════════
+                # 3-TIER TRAILING STOP
+                # ══════════════════════════════════════════════════════
+                new_sl = stop_price
+                trailing_tier = ""
+
+                if atr_dollar > 0:
+                    if side == "LONG":
+                        unrealized_atr = (close_price - entry_price) / atr_dollar
+                        if unrealized_atr >= C.TRAILING_FOLLOW_ATR:
+                            # Tier 3: Trail 1.5 ATR below current price
+                            candidate_sl = close_price - (1.5 * atr_dollar)
+                            new_sl = max(new_sl, candidate_sl)
+                            trailing_tier = "TRAILING"
+                        elif unrealized_atr >= C.TRAILING_LOCK_ATR:
+                            # Tier 2: Lock 1.0 ATR profit
+                            candidate_sl = entry_price + (1.0 * atr_dollar)
+                            new_sl = max(new_sl, candidate_sl)
+                            trailing_tier = "PROFIT_LOCK"
+                        elif unrealized_atr >= C.TRAILING_BE_ATR:
+                            # Tier 1: Break-even + 1 tick
+                            candidate_sl = entry_price + 0.01
+                            new_sl = max(new_sl, candidate_sl)
+                            trailing_tier = "BREAK_EVEN"
+
+                    elif side == "SHORT":
+                        unrealized_atr = (entry_price - close_price) / atr_dollar
+                        if unrealized_atr >= C.TRAILING_FOLLOW_ATR:
+                            candidate_sl = close_price + (1.5 * atr_dollar)
+                            new_sl = min(new_sl, candidate_sl) if new_sl > 0 else candidate_sl
+                            trailing_tier = "TRAILING"
+                        elif unrealized_atr >= C.TRAILING_LOCK_ATR:
+                            candidate_sl = entry_price - (1.0 * atr_dollar)
+                            new_sl = min(new_sl, candidate_sl) if new_sl > 0 else candidate_sl
+                            trailing_tier = "PROFIT_LOCK"
+                        elif unrealized_atr >= C.TRAILING_BE_ATR:
+                            candidate_sl = entry_price - 0.01
+                            new_sl = min(new_sl, candidate_sl) if new_sl > 0 else candidate_sl
+                            trailing_tier = "BREAK_EVEN"
+
+                if new_sl != stop_price:
                     with db._lock:
                         db._conn.execute(
                             "UPDATE trade_signals SET stop_price = ? WHERE signal_id = ?",
-                            [stop_price, signal_id]
+                            [round(new_sl, 2), signal_id],
                         )
-                    LOGGER.info("MONITOR: Break-Even triggered for %s. Moving SL to %.2f", signal_id[:8], stop_price)
+                    stop_price = round(new_sl, 2)
+                    LOGGER.info("REAPER: %s trailing → SL=%.2f (%s)", signal_id[:8], stop_price, trailing_tier)
 
+                # ══════════════════════════════════════════════════════
+                # EXIT CHECKS (priority order)
+                # ══════════════════════════════════════════════════════
+                trigger_reason = None
+                end_status = None
+                exit_reason = ""
+
+                # 0. Partial Take-Profit (scale-out 50% at TP1)
+                if C.PARTIAL_TP_ENABLED and atr_dollar > 0:
+                    partial_tp1_dist = C.PARTIAL_TP1_ATR_MULT * atr_dollar
+                    # Check if partial TP already taken
+                    with db._lock:
+                        ptp_row = db._conn.execute(
+                            "SELECT partial_tp_taken FROM trade_signals WHERE signal_id = ?",
+                            [signal_id],
+                        ).fetchone()
+                    partial_already = bool(ptp_row and ptp_row[0])
+
+                    if not partial_already:
+                        tp1_hit = False
+                        if side == "LONG" and close_price >= entry_price + partial_tp1_dist:
+                            tp1_hit = True
+                        elif side == "SHORT" and close_price <= entry_price - partial_tp1_dist:
+                            tp1_hit = True
+
+                        if tp1_hit:
+                            # Record partial close: mark flag, move SL to BE + 1 tick
+                            be_sl = entry_price + 0.01 if side == "LONG" else entry_price - 0.01
+                            # Extend the full TP by 2× (let remaining ride)
+                            new_full_tp = take_profit + (take_profit - entry_price) if side == "LONG" else take_profit - (entry_price - take_profit)
+                            with db._lock:
+                                db._conn.execute(
+                                    """UPDATE trade_signals SET
+                                        partial_tp_taken = TRUE,
+                                        stop_price = ?,
+                                        take_profit = ?
+                                    WHERE signal_id = ?""",
+                                    [round(be_sl, 2), round(new_full_tp, 2), signal_id],
+                                )
+                            stop_price = round(be_sl, 2)
+                            take_profit = round(new_full_tp, 2)
+
+                            # Log partial close as event
+                            partial_pnl = C.PARTIAL_TP_FRACTION * current_excursion
+                            _store_system_event(
+                                db=db, symbol=symbol,
+                                event_type="partial_tp_hit",
+                                title=f"Partial TP: {signal_id[:8]} — 50% closed at {close_price:.2f}",
+                                message=(
+                                    f"{side} partial close ({C.PARTIAL_TP_FRACTION*100:.0f}%) at "
+                                    f"{close_price:.2f}, SL→BE({be_sl:.2f}), "
+                                    f"TP extended to {new_full_tp:.2f}. "
+                                    f"Partial PnL: {partial_pnl:.2f}%"
+                                ),
+                                status="COMPLETED",
+                                payload={
+                                    "signal_id": signal_id, "side": side,
+                                    "partial_close_price": close_price,
+                                    "partial_fraction": C.PARTIAL_TP_FRACTION,
+                                    "new_sl": be_sl, "new_tp": new_full_tp,
+                                    "partial_pnl_pct": round(partial_pnl, 4),
+                                },
+                            )
+                            LOGGER.info(
+                                "REAPER: %s PARTIAL TP1 → 50%% closed at %.2f | SL→BE(%.2f) | TP→%.2f",
+                                signal_id[:8], close_price, be_sl, new_full_tp,
+                            )
+
+                # 1. TP/SL hits
                 if side == "LONG":
                     if close_price <= stop_price:
                         trigger_reason = "stop_loss_hit"
-                        end_status = "LOSS"
+                        exit_reason = "SL_HIT"
                     elif close_price >= take_profit:
                         trigger_reason = "take_profit_hit"
-                        end_status = "WIN"
+                        exit_reason = "TP_HIT"
                 elif side == "SHORT":
                     if close_price >= stop_price:
                         trigger_reason = "stop_loss_hit"
-                        end_status = "LOSS"
+                        exit_reason = "SL_HIT"
                     elif close_price <= take_profit:
                         trigger_reason = "take_profit_hit"
-                        end_status = "WIN"
+                        exit_reason = "TP_HIT"
 
-                if not trigger_reason and is_expired:
-                    trigger_reason = "reaper_forced_close"
-                    end_status = "EXPIRED"
+                # 2. Trend reversal check (every 30s, with hysteresis)
+                if not trigger_reason and do_trend_check:
+                    trend_holds = TFA.check_trend_holds_for_side(side)
+                    if not trend_holds:
+                        trend_fail_count += 1
+                        if trend_fail_count >= C.TREND_REVERSAL_HYSTERESIS:
+                            trigger_reason = "trend_reversal"
+                            exit_reason = "TREND_REVERSAL"
+                        else:
+                            # Update fail count but don't close yet
+                            with db._lock:
+                                db._conn.execute(
+                                    "UPDATE trade_signals SET trend_fail_count = ? WHERE signal_id = ?",
+                                    [trend_fail_count, signal_id],
+                                )
+                    else:
+                        if trend_fail_count > 0:
+                            trend_fail_count = 0
+                            with db._lock:
+                                db._conn.execute(
+                                    "UPDATE trade_signals SET trend_fail_count = 0 WHERE signal_id = ?",
+                                    [signal_id],
+                                )
 
                 if not trigger_reason:
                     continue  # Trade remains OPEN
 
-                # Calculate P&L
+                # ── Fee-aware PnL calculation ──
                 if side == "LONG":
-                    pnl_pct = ((close_price - entry_price) / entry_price) * 100
+                    gross_pnl_pct = (close_price - entry_price) / entry_price
                 elif side == "SHORT":
-                    pnl_pct = ((entry_price - close_price) / entry_price) * 100
+                    gross_pnl_pct = (entry_price - close_price) / entry_price
                 else:
-                    pnl_pct = 0.0
+                    gross_pnl_pct = 0.0
+
+                net_pnl_pct = gross_pnl_pct - C.ROUND_TRIP_FEE
+                pnl_pct = gross_pnl_pct * 100
+                was_profitable = net_pnl_pct > 0
+
+                # Status: WIN only if net profitable
+                if exit_reason == "TP_HIT":
+                    end_status = "WIN" if was_profitable else "LOSS"
+                elif exit_reason == "TREND_REVERSAL":
+                    end_status = "TREND_REVERSAL"
+                else:
+                    end_status = "WIN" if was_profitable else "LOSS"
+
+                # Fee erosion override
+                if exit_reason == "TP_HIT" and not was_profitable:
+                    trigger_reason = "fee_erosion"
 
                 with db._lock:
                     db._conn.execute(
@@ -343,10 +522,25 @@ async def trade_reaper_loop(
                             pnl_pct = ?,
                             was_profitable = ?,
                             outcome_reason = ?,
-                            data_quality = 'ok'
+                            data_quality = 'ok',
+                            gross_pnl_percent = ?,
+                            net_pnl_percent = ?,
+                            mfe_percent = ?,
+                            mae_percent = ?,
+                            exit_reason = ?,
+                            max_unrealized_pnl_percent = ?,
+                            drawdown_from_peak_percent = ?
                         WHERE signal_id = ?
                         """,
-                        [end_status, now, close_price, round(pnl_pct, 4), pnl_pct > 0, trigger_reason, signal_id],
+                        [
+                            end_status, now, close_price, round(pnl_pct, 4),
+                            was_profitable, trigger_reason,
+                            round(gross_pnl_pct, 6), round(net_pnl_pct, 6),
+                            round(new_mfe, 6), round(new_mae, 6),
+                            exit_reason,
+                            round(new_max_unrealized, 6), round(drawdown_from_peak, 6),
+                            signal_id,
+                        ],
                     )
                     db._conn.execute(
                         """
@@ -356,11 +550,35 @@ async def trade_reaper_loop(
                         [signal_id, symbol, end_status, close_price, round(pnl_pct, 4), trigger_reason],
                     )
 
+                # Update hourly_performance
+                try:
+                    db.update_hourly_performance({
+                        "hour_utc": generated_at.hour if generated_at else now.hour,
+                        "side": side,
+                        "regime": regime,
+                        "status": "WIN" if was_profitable else "LOSS",
+                        "mfe_percent": new_mfe,
+                        "mae_percent": new_mae,
+                    })
+                except Exception as hp_err:
+                    LOGGER.debug("hourly_performance update failed: %s", hp_err)
+
+                # Post-close analysis for trend reversals
+                post_note = ""
+                if exit_reason == "TREND_REVERSAL":
+                    if was_profitable:
+                        post_note = "GOOD_EARLY_EXIT"
+                    else:
+                        post_note = "LATE_EXIT"
+
                 LOGGER.warning(
-                    "MONITOR: Closed %s | %s %s | Reason=%s | "
-                    "Entry=%.2f Close=%.2f | PnL=%.4f%%",
-                    signal_id[:8], side, symbol, trigger_reason,
-                    entry_price, close_price, pnl_pct,
+                    "REAPER: Closed %s | %s %s | Exit=%s | "
+                    "Entry=%.2f Close=%.2f | Gross=%.4f%% Net=%.4f%% | "
+                    "MFE=%.4f%% MAE=%.4f%% | Duration=%ds | %s",
+                    signal_id[:8], side, symbol, exit_reason,
+                    entry_price, close_price,
+                    gross_pnl_pct * 100, net_pnl_pct * 100,
+                    new_mfe, new_mae, int(duration_s), post_note,
                 )
                 _store_system_event(
                     db=db,
@@ -368,19 +586,27 @@ async def trade_reaper_loop(
                     event_type="trade_closed",
                     title=f"Trade Closed: {signal_id[:8]}",
                     message=(
-                        f"{side} trade closed ({trigger_reason}). "
-                        f"Close={close_price:.2f}, PnL={pnl_pct:.4f}%"
+                        f"{side} closed ({exit_reason}). "
+                        f"Close={close_price:.2f}, Gross={gross_pnl_pct*100:.4f}%, "
+                        f"Net={net_pnl_pct*100:.4f}%, Duration={int(duration_s)}s "
+                        f"{post_note}"
                     ),
-                    status=("COMPLETED" if end_status == "WIN" else "WARN"),
+                    status=("COMPLETED" if was_profitable else "WARN"),
                     payload={
-                        "signal_id": signal_id,
-                        "side": side,
-                        "entry_price": entry_price,
-                        "close_price": close_price,
+                        "signal_id": signal_id, "side": side,
+                        "entry_price": entry_price, "close_price": close_price,
                         "trigger_reason": trigger_reason,
+                        "exit_reason": exit_reason,
                         "end_status": end_status,
                         "duration_seconds": round(duration_s),
-                        "pnl_pct": round(pnl_pct, 4),
+                        "gross_pnl_pct": round(gross_pnl_pct * 100, 4),
+                        "net_pnl_pct": round(net_pnl_pct * 100, 4),
+                        "mfe_percent": round(new_mfe, 4),
+                        "mae_percent": round(new_mae, 4),
+                        "max_unrealized": round(new_max_unrealized, 4),
+                        "drawdown_from_peak": round(drawdown_from_peak, 4),
+                        "trailing_tier": trailing_tier,
+                        "post_note": post_note,
                     },
                 )
                 closed_any = True
@@ -418,7 +644,8 @@ async def async_main() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
-    from datetime import datetime, timedelta  # needed by reaper
+    from datetime import datetime, timedelta
+    import engine.analysis.timeframe_analysis as TFA
 
     LOGGER.info(
         "Starting pipeline | symbol=%s | db=%s | llm=%s (%s)",
@@ -441,7 +668,7 @@ async def async_main() -> None:
         symbol=settings.symbol,
         event_type="pipeline_started",
         title="Pipeline started",
-        message="Started ingestion and analysis services.",
+        message="Multi-TF trend-capture system starting.",
         status="COMPLETED",
         payload={
             "db_path": active_db_path,
@@ -461,10 +688,10 @@ async def async_main() -> None:
         db=db,
         symbol=settings.symbol,
         lookback_seconds=settings.lookback_seconds,
-        horizon_seconds=settings.signal_horizon_seconds,
         capital_base=settings.reporting_capital_base,
     )
 
+    # Core tasks
     ingestion_task = asyncio.create_task(ingestion_agent.run_forever(), name="binance_ingestion")
     analysis_task = asyncio.create_task(
         analysis_loop(
@@ -492,18 +719,56 @@ async def async_main() -> None:
         name="dashboard_snapshot_loop",
     )
     api_task = asyncio.create_task(run_api_server(host="0.0.0.0", port=8000), name="fastapi_server")
+
+    # Structural exit reaper (no horizon_seconds — structural exits only)
     reaper_task = asyncio.create_task(
         trade_reaper_loop(
             db=db,
             symbol=settings.symbol,
-            horizon_seconds=settings.signal_horizon_seconds,
-            check_interval_seconds=2,
+            check_interval_seconds=1.0,
         ),
         name="trade_reaper",
     )
 
+    # Data streams
+    l2_depth_task = asyncio.create_task(
+        run_l2_depth_stream(db=db, symbol=settings.symbol),
+        name="l2_depth_stream",
+    )
+    funding_task = asyncio.create_task(
+        run_funding_rate_poller(symbol=settings.symbol),
+        name="funding_rate_poller",
+    )
+
+    # Multi-TF trend engine
+    tf_task = asyncio.create_task(
+        TFA.refresh_all_timeframes(symbol=settings.symbol),
+        name="timeframe_analysis",
+    )
+
+    # Auto-tune (weekly)
+    autotune_task = asyncio.create_task(
+        TFA.auto_tune_loop(db=db, symbol=settings.symbol),
+        name="auto_tune",
+    )
+
+    LOGGER.info(
+        "Trend-capture system active: ROUND_TRIP_FEE=%.4f%%, MIN_EDGE=%.4f%%, "
+        "NO_TIME_EXPIRY, TRAILING_BE=%.1f/LOCK=%.1f/FOLLOW=%.1f ATR, "
+        "ALIGNMENT_MIN=%.1f, TREND_REVERSAL_HYSTERESIS=%d",
+        C.ROUND_TRIP_FEE * 100, C.MINIMUM_GROSS_EDGE_PERCENT * 100,
+        C.TRAILING_BE_ATR, C.TRAILING_LOCK_ATR, C.TRAILING_FOLLOW_ATR,
+        C.MIN_ALIGNMENT_SCORE, C.TREND_REVERSAL_HYSTERESIS,
+    )
+
+    all_tasks = [
+        ingestion_task, analysis_task, dashboard_snapshot_task,
+        api_task, reaper_task, l2_depth_task, funding_task,
+        tf_task, autotune_task,
+    ]
+
     try:
-        await asyncio.gather(ingestion_task, analysis_task, dashboard_snapshot_task, api_task, reaper_task)
+        await asyncio.gather(*all_tasks)
     finally:
         _store_system_event(
             db=db,
@@ -514,10 +779,10 @@ async def async_main() -> None:
             status="WARN",
         )
         ingestion_agent.stop()
-        for task in (ingestion_task, analysis_task, dashboard_snapshot_task, api_task, reaper_task):
+        for task in all_tasks:
             task.cancel()
         with suppress(asyncio.CancelledError, Exception):
-            await asyncio.gather(ingestion_task, analysis_task, dashboard_snapshot_task, api_task, reaper_task, return_exceptions=True)
+            await asyncio.gather(*all_tasks, return_exceptions=True)
         db.close()
 
 
@@ -530,3 +795,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
