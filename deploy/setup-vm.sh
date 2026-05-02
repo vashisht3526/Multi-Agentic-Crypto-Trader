@@ -3,6 +3,9 @@
 # Azure VM Setup Script — Multi-Agentic Crypto Trader
 # Run this ONCE after SSH-ing into a fresh Ubuntu 24.04 VM.
 #
+# Since the repo is PRIVATE, you need a GitHub Personal Access
+# Token (PAT) to clone. The script will prompt you for it.
+#
 # Usage:
 #   chmod +x deploy/setup-vm.sh
 #   ./deploy/setup-vm.sh
@@ -13,6 +16,7 @@ set -euo pipefail
 APP_DIR="/home/azureuser/cryptotrader"
 VENV_DIR="${APP_DIR}/.venv"
 SERVICE_FILE="/etc/systemd/system/cryptotrader.service"
+REPO_URL="https://github.com/vashisht3526/Multi-Agentic-Crypto-Trader.git"
 
 echo ""
 echo "=================================================="
@@ -25,16 +29,33 @@ echo "[1/6] Installing system dependencies..."
 sudo apt update -qq
 sudo apt install -y python3 python3-venv python3-pip git curl
 
-# ── 2. Clone or update repo ─────────────────────────────────
+# ── 2. Clone or update repo (PRIVATE — needs GitHub PAT) ───
 echo "[2/6] Setting up project directory..."
 if [ -d "${APP_DIR}/.git" ]; then
     echo "  Project already cloned. Pulling latest..."
     cd "${APP_DIR}"
     git pull origin main
 else
-    echo "  Cloning repository..."
-    git clone https://github.com/vashisht3526/Multi-Agentic-Crypto-Trader.git "${APP_DIR}"
+    echo ""
+    echo "  This is a PRIVATE repository. You need a GitHub Personal Access Token."
+    echo "  Generate one at: https://github.com/settings/tokens"
+    echo "  (Select 'repo' scope → Generate → Copy the token)"
+    echo ""
+    read -rp "  Enter your GitHub PAT: " GH_TOKEN
+
+    if [ -z "${GH_TOKEN}" ]; then
+        echo "  ERROR: No token provided. Cannot clone private repo."
+        exit 1
+    fi
+
+    # Clone using PAT in the URL
+    CLONE_URL="https://${GH_TOKEN}@github.com/vashisht3526/Multi-Agentic-Crypto-Trader.git"
+    git clone "${CLONE_URL}" "${APP_DIR}"
     cd "${APP_DIR}"
+
+    # Store credentials so future git pull doesn't ask again
+    git config credential.helper store
+    echo "  Repository cloned ✓"
 fi
 
 # ── 3. Python virtual environment ───────────────────────────
@@ -47,20 +68,14 @@ pip install --upgrade pip -q
 pip install -r requirements.txt -q
 echo "  Installed $(pip list 2>/dev/null | wc -l) packages."
 
-# ── 4. Environment file check ───────────────────────────────
+# ── 4. Verify .env file ────────────────────────────────────
 echo "[4/6] Checking .env file..."
-if [ ! -f "${APP_DIR}/.env" ]; then
-    echo ""
-    echo "  ⚠  WARNING: No .env file found!"
-    echo "  Copy it from your local machine using:"
-    echo "    scp -i your-key.pem .env azureuser@<VM-IP>:${APP_DIR}/.env"
-    echo ""
-    echo "  Or copy the template and fill in your keys:"
-    cp "${APP_DIR}/.env.example" "${APP_DIR}/.env"
-    echo "    nano ${APP_DIR}/.env"
-    echo ""
+if [ -f "${APP_DIR}/.env" ]; then
+    echo "  .env file found ✓ (shipped with repo)"
 else
-    echo "  .env file exists ✓"
+    echo "  ⚠  WARNING: .env file missing! Copying from .env.example..."
+    cp "${APP_DIR}/.env.example" "${APP_DIR}/.env"
+    echo "  Please edit it:  nano ${APP_DIR}/.env"
 fi
 
 # ── 5. Install systemd service ──────────────────────────────
@@ -82,22 +97,18 @@ fi
 
 echo ""
 echo "=================================================="
-echo "  ✓ Setup complete!"
+echo "  ✓ Setup complete! Everything is ready."
 echo "=================================================="
 echo ""
-echo "  Next steps:"
-echo "    1. Upload your .env file (if not done):"
-echo "         scp -i key.pem .env azureuser@<VM-IP>:${APP_DIR}/.env"
+echo "  Start the trading engine:"
+echo "    sudo systemctl start cryptotrader"
 echo ""
-echo "    2. Upload your DuckDB database (if you have history):"
-echo "         scp -i key.pem binance_ticks.duckdb azureuser@<VM-IP>:${APP_DIR}/"
+echo "  Watch live logs:"
+echo "    sudo journalctl -u cryptotrader -f"
 echo ""
-echo "    3. Start the trading engine:"
-echo "         sudo systemctl start cryptotrader"
+echo "  Check status:"
+echo "    sudo systemctl status cryptotrader"
 echo ""
-echo "    4. Watch live logs:"
-echo "         sudo journalctl -u cryptotrader -f"
-echo ""
-echo "    5. Check status:"
-echo "         sudo systemctl status cryptotrader"
+echo "  (Optional) Upload your DuckDB history from your PC:"
+echo "    scp -i key.pem binance_ticks.duckdb azureuser@<VM-IP>:${APP_DIR}/"
 echo ""

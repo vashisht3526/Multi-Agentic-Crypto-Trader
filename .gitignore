@@ -5,8 +5,8 @@ __pycache__/
 *.pyo
 .ruff_cache/
 
-# Environment
-.env
+# Environment (tracked because repo is PRIVATE — never make this repo public!)
+# .env
 
 # Database (large binary files)
 *.duckdb

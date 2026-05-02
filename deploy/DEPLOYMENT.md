@@ -45,33 +45,41 @@ The architecture requires a VM (not App Service/PaaS) because:
 ssh -i "path/to/your-key.pem" azureuser@<VM_PUBLIC_IP>
 ```
 
-### 3. Run the Setup Script
+### 3. Run the Setup Script (One Command Does Everything)
+
+The setup script will ask for your GitHub Personal Access Token (since the repo is private),
+then automatically clone the repo, install Python, create the venv, and configure systemd.
+
+> **Get a PAT:** Go to https://github.com/settings/tokens → Generate new token (classic) → Select `repo` scope → Generate → Copy.
 
 ```bash
-# Clone the repo (the setup script does this automatically)
-git clone https://github.com/vashisht3526/Multi-Agentic-Crypto-Trader.git cryptotrader
-cd cryptotrader
-chmod +x deploy/setup-vm.sh
-./deploy/setup-vm.sh
+# Download and run the setup script directly
+curl -fsSL "https://raw.githubusercontent.com/vashisht3526/Multi-Agentic-Crypto-Trader/main/deploy/setup-vm.sh" -o setup-vm.sh
+chmod +x setup-vm.sh
+./setup-vm.sh
 ```
 
-### 4. Upload Your Secrets and Data
+> **Note:** Your `.env` file with API keys is included in the private repo.
+> No need to upload it separately — `git clone` brings everything.
 
-From your **local Windows PC** (PowerShell):
+### 4. (Optional) Upload Your DuckDB History
+
+If you want to preserve your existing trade history from your local PC:
 
 ```powershell
-# Upload .env with your API keys
-scp -i "path\to\your-key.pem" ".env" azureuser@<VM_IP>:/home/azureuser/cryptotrader/.env
-
-# Upload your historical DuckDB database (optional, ~300MB)
+# Run this on your local Windows PC (PowerShell)
 scp -i "path\to\your-key.pem" "binance_ticks.duckdb" azureuser@<VM_IP>:/home/azureuser/cryptotrader/
 ```
+
+If you skip this, the engine will create a fresh database automatically.
 
 ### 5. Start the Engine
 
 ```bash
 sudo systemctl start cryptotrader
 ```
+
+> **That's it.** No code changes, no config edits, no API key uploads needed.
 
 ### 6. Verify It's Running
 
