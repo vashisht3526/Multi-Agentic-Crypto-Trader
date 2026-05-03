@@ -67,10 +67,13 @@ function Icon({ name }) {
 function KairosLogo() {
   return (
     <svg className="kairos-logo" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <path className="kairos-logo-core" d="M32 10 L48 32 L32 54 L16 32 Z" strokeLinejoin="round" />
-      <path className="kairos-logo-orbit" d="M12 32 C12 12, 52 12, 52 32" />
-      <path className="kairos-logo-hand" d="M32 54 L44 40" strokeLinecap="round" />
-      <circle className="kairos-logo-dot" cx="52" cy="32" r="3" />
+      <path className="kairos-logo-orbit" d="M11 35C15 16 36 7 52 19" />
+      <path className="kairos-logo-hourglass" d="M22 13H42M22 51H42M24 16C27 25 37 25 40 16M24 48C27 39 37 39 40 48" />
+      <path className="kairos-logo-window" d="M25 22L32 32L39 22M25 42L32 32L39 42" />
+      <path className="kairos-logo-signal" d="M15 40L24 35L30 38L37 27L44 29L51 20" />
+      <path className="kairos-logo-arrow" d="M45 20H51V26" />
+      <circle className="kairos-logo-core" cx="32" cy="32" r="4.5" />
+      <circle className="kairos-logo-dot" cx="51" cy="20" r="3.2" />
     </svg>
   );
 }
@@ -147,7 +150,6 @@ export default function AppShell({ ws, children }) {
           </div>
           <div>
             <h1>Kairos</h1>
-            <div className="tag">Temporal Signal OS</div>
           </div>
         </div>
         <nav className="sidebar-nav">

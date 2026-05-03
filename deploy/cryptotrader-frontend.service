@@ -1,5 +1,5 @@
 [Unit]
-Description=Chronos Frontend
+Description=Kairos Frontend
 After=network-online.target cryptotrader.service
 Wants=network-online.target
 

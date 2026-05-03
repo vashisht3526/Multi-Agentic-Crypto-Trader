@@ -8,7 +8,7 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor Cyan
-Write-Host "   Kairos - Temporal Signal OS" -ForegroundColor Cyan
+Write-Host "   Kairos" -ForegroundColor Cyan
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
 

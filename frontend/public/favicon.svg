@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <linearGradient id="bg" x1="8" y1="8" x2="56" y2="56">
-      <stop offset="0" stop-color="#2ad9ec"/>
-      <stop offset=".48" stop-color="#121419"/>
-      <stop offset="1" stop-color="#e8cf9b"/>
+    <linearGradient id="shell" x1="8" y1="6" x2="58" y2="58">
+      <stop offset="0" stop-color="#e8cf9b"/>
+      <stop offset=".46" stop-color="#101319"/>
+      <stop offset="1" stop-color="#2ad9ec"/>
     </linearGradient>
     <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
       <feGaussianBlur stdDeviation="2.2" result="blur"/>
@@ -14,10 +14,12 @@
     </filter>
   </defs>
   <rect width="64" height="64" rx="18" fill="#050608"/>
-  <rect x="5" y="5" width="54" height="54" rx="15" fill="url(#bg)" opacity=".22"/>
-  <circle cx="32" cy="32" r="21" fill="#07090d" stroke="#e8cf9b" stroke-width="2.4"/>
-  <path d="M11 36c4.8-15.6 20.7-27.2 35.5-21.8 8.9 3.2 9.3 12.3 1.2 18.1-9.7 6.9-27 7.6-37.6 1.5" fill="none" stroke="#2ad9ec" stroke-width="3" stroke-linecap="round" filter="url(#glow)"/>
-  <path d="M24 19h16M24 45h16M27 21c0 7.8 10 8.8 10 11s-10 3.2-10 11M37 21c0 7.8-10 8.8-10 11s10 3.2 10 11" fill="none" stroke="#e8cf9b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M32 32l9-6" fill="none" stroke="#f5f7fa" stroke-width="2.5" stroke-linecap="round"/>
-  <circle cx="47" cy="22" r="3.2" fill="#27da8f" filter="url(#glow)"/>
+  <rect x="5" y="5" width="54" height="54" rx="15" fill="url(#shell)" opacity=".25"/>
+  <path d="M11 35C15 16 36 7 52 19" fill="none" stroke="#2ad9ec" stroke-width="3" stroke-linecap="round" opacity=".78" filter="url(#glow)"/>
+  <path d="M22 13H42M22 51H42M24 16C27 25 37 25 40 16M24 48C27 39 37 39 40 48" fill="none" stroke="#e8cf9b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M25 22L32 32L39 22M25 42L32 32L39 42" fill="none" stroke="#e8cf9b" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round" opacity=".76"/>
+  <path d="M15 40L24 35L30 38L37 27L44 29L51 20" fill="none" stroke="#f5f7fa" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M45 20H51V26" fill="none" stroke="#f5f7fa" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="4.5" fill="#050608" stroke="#2ad9ec" stroke-width="2" filter="url(#glow)"/>
+  <circle cx="51" cy="20" r="3.2" fill="#27da8f" filter="url(#glow)"/>
 </svg>

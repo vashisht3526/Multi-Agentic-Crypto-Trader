@@ -171,11 +171,15 @@ select {
   border: 1px solid rgba(232, 207, 155, 0.36);
   border-radius: 15px;
   background:
-    radial-gradient(circle at 62% 28%, rgba(42, 217, 236, 0.25), transparent 34%),
-    linear-gradient(145deg, rgba(232, 207, 155, 0.26), rgba(42, 217, 236, 0.12)),
+    radial-gradient(circle at 72% 24%, rgba(39, 218, 143, 0.28), transparent 24%),
+    radial-gradient(circle at 29% 68%, rgba(42, 217, 236, 0.22), transparent 34%),
+    linear-gradient(145deg, rgba(232, 207, 155, 0.22), rgba(42, 217, 236, 0.1)),
     rgba(7, 9, 12, 0.9);
   color: var(--text-primary);
-  box-shadow: 0 14px 34px rgba(42, 217, 236, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 14px 34px rgba(42, 217, 236, 0.1),
+    0 0 0 1px rgba(232, 207, 155, 0.05) inset,
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
 .kairos-logo {
@@ -184,42 +188,59 @@ select {
   overflow: visible;
 }
 
-.kairos-logo-core {
-  stroke: rgba(232, 207, 155, 0.72);
-  stroke-width: 2;
-  fill: rgba(5, 6, 8, 0.45);
-}
-
 .kairos-logo-orbit {
   stroke: var(--accent-cyan);
-  stroke-width: 2.6;
+  stroke-width: 2.4;
   stroke-linecap: round;
-  opacity: 0.9;
+  opacity: 0.72;
   filter: drop-shadow(0 0 7px rgba(42, 217, 236, 0.38));
   transform-origin: 32px 32px;
-  animation: kairos-orbit 8s linear infinite;
+  animation: kairos-orbit 10s ease-in-out infinite;
 }
 
 .kairos-logo-hourglass,
-.kairos-logo-hand {
+.kairos-logo-window {
   stroke: var(--accent-champagne);
-  stroke-width: 2.6;
+  stroke-width: 2.35;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-.kairos-logo-hand {
+.kairos-logo-window {
+  opacity: 0.78;
+}
+
+.kairos-logo-signal,
+.kairos-logo-arrow {
   stroke: var(--text-primary);
-  stroke-width: 2.2;
+  stroke-width: 2.45;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 7px rgba(245, 247, 250, 0.18));
+}
+
+.kairos-logo-core {
+  fill: rgba(5, 6, 8, 0.92);
+  stroke: var(--accent-cyan);
+  stroke-width: 1.8;
+  filter: drop-shadow(0 0 7px rgba(42, 217, 236, 0.4));
 }
 
 .kairos-logo-dot {
   fill: var(--bull);
-  filter: drop-shadow(0 0 7px rgba(39, 218, 143, 0.7));
+  filter: drop-shadow(0 0 8px rgba(39, 218, 143, 0.75));
+  transform-origin: 51px 20px;
+  animation: kairos-dot 1.9s ease-in-out infinite;
 }
 
 @keyframes kairos-orbit {
-  to { transform: rotate(360deg); }
+  0%, 100% { opacity: 0.48; transform: translateY(0); }
+  50% { opacity: 0.9; transform: translateY(-1px); }
+}
+
+@keyframes kairos-dot {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
 }
 
 .sidebar-nav {

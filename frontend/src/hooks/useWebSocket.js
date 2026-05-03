@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 
-const WS_URL = `ws://${window.location.hostname}:8000/ws/live`;
+const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const WS_URL = `${protocol}//${window.location.host}/ws/live`;
 
 export function useWebSocket() {
   const [data, setData] = useState(null);

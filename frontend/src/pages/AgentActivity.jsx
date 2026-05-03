@@ -70,7 +70,6 @@ export default function AgentActivity() {
   const visibleRuns = runGroups(visibleEvents).slice(0, 18);
   const standaloneEvents = visibleEvents
     .filter((ev) => !ev.run_id)
-    .sort((a, b) => new Date(b.event_time || 0) - new Date(a.event_time || 0))
     .slice(0, mode === 'heartbeats' ? 60 : 24);
 
   return (

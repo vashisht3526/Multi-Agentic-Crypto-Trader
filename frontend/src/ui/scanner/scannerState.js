@@ -31,16 +31,28 @@ export function eventTime(ev) {
   return ev?.event_time || ev?.created_at || ev?.timestamp || null;
 }
 
-export function eventMs(ev) {
+function isLocalHost() {
+  return typeof window !== 'undefined' && ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+}
+
+function parseEventDate(ev) {
   const time = eventTime(ev);
-  const ms = time ? new Date(time).getTime() : 0;
-  return Number.isFinite(ms) ? ms : 0;
+  if (!time) return null;
+  const text = String(time);
+  const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(text);
+  const normalized = !hasTimezone && !isLocalHost() ? `${text}Z` : text;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function eventMs(ev) {
+  return parseEventDate(ev)?.getTime() || 0;
 }
 
 export function formatEventTime(ev) {
-  const time = eventTime(ev);
-  if (!time) return '--';
-  return new Date(time).toLocaleTimeString([], {
+  const date = parseEventDate(ev);
+  if (!date) return '--';
+  return date.toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -53,14 +65,12 @@ export function isHeartbeatEvent(ev) {
 
 export function decisionEvents(events) {
   return normalizeEvents(events)
-    .filter((ev) => !isHeartbeatEvent(ev))
-    .sort((a, b) => eventMs(b) - eventMs(a));
+    .filter((ev) => !isHeartbeatEvent(ev));
 }
 
 export function heartbeatEvents(events) {
   return normalizeEvents(events)
-    .filter(isHeartbeatEvent)
-    .sort((a, b) => eventMs(b) - eventMs(a));
+    .filter(isHeartbeatEvent);
 }
 
 function isOutcomeEvent(ev) {
@@ -78,15 +88,15 @@ export function runGroups(events) {
     });
 
   return Array.from(groups.entries()).map(([runId, runEvents]) => {
-    const sorted = [...runEvents].sort((a, b) => eventMs(b) - eventMs(a));
-    const ordered = [...runEvents].sort((a, b) => eventMs(a) - eventMs(b));
-    const outcome = sorted.find(isOutcomeEvent) || sorted[0];
+    const latestFirst = [...runEvents];
+    const ordered = [...runEvents].reverse();
+    const outcome = latestFirst.find(isOutcomeEvent) || latestFirst[0];
 
     return {
       runId,
-      events: sorted,
+      events: latestFirst,
       ordered,
-      latest: sorted[0],
+      latest: latestFirst[0],
       outcome,
     };
   });

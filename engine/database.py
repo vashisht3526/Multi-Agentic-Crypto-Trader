@@ -511,7 +511,7 @@ class FastTickDatabase:
                     payload_json
                 FROM crew_events
                 WHERE symbol = ? AND run_id = ?
-                ORDER BY event_time DESC
+                ORDER BY rowid DESC
                 LIMIT ?
             """
             params: list[Any] = [symbol, run_id, max(limit, 1)]
@@ -528,7 +528,7 @@ class FastTickDatabase:
                     payload_json
                 FROM crew_events
                 WHERE symbol = ?
-                ORDER BY event_time DESC
+                ORDER BY rowid DESC
                 LIMIT ?
             """
             params = [symbol, max(limit, 1)]
