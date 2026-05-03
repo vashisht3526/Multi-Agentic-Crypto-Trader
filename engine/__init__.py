@@ -1,5 +1,5 @@
 """
-Chronos Engine - Core trading system package.
+Kairos Engine - Core trading system package.
 
 Subpackages:
     engine.analysis  - Technical analysis (ATR, ADX, NOFI, multi-TF)

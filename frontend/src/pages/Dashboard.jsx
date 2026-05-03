@@ -1,5 +1,6 @@
 import { useApi } from '../hooks/useApi';
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
+import ScannerStatusPanel from '../ui/scanner/ScannerStatusPanel';
 
 function formatPrice(v) {
   if (v == null) return '--';
@@ -24,6 +25,7 @@ export default function Dashboard({ ws }) {
   const { data: sessionData } = useApi('/api/performance/by-session', 30000);
   const { data: missedData } = useApi('/api/signals/missed-profit?limit=5', 30000);
   const { data: tfBias } = useApi('/api/timeframe/bias', 15000);
+  const { data: agentEvents } = useApi('/api/agents/events?limit=300', 10000);
 
   const price = ws?.data?.last_price ?? data?.last_price;
   const activeSignals = ws?.data?.active_signals ?? [];
@@ -91,6 +93,8 @@ export default function Dashboard({ ws }) {
           <div className="kpi-note">Peak-to-trough</div>
         </div>
       </div>
+
+      <ScannerStatusPanel events={agentEvents} bias={bias} compact />
 
       {equity.length > 1 && (
         <div className="chart-card dashboard-equity-card">

@@ -64,14 +64,13 @@ function Icon({ name }) {
   );
 }
 
-function ChronosLogo() {
+function KairosLogo() {
   return (
-    <svg className="chronos-logo" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <circle className="chronos-logo-core" cx="32" cy="32" r="21" />
-      <path className="chronos-logo-orbit" d="M11 36c4.8-15.6 20.7-27.2 35.5-21.8 8.9 3.2 9.3 12.3 1.2 18.1-9.7 6.9-27 7.6-37.6 1.5" />
-      <path className="chronos-logo-hourglass" d="M24 19h16M24 45h16M27 21c0 7.8 10 8.8 10 11s-10 3.2-10 11M37 21c0 7.8-10 8.8-10 11s10 3.2 10 11" />
-      <path className="chronos-logo-hand" d="M32 32l9-6" />
-      <circle className="chronos-logo-dot" cx="47" cy="22" r="3" />
+    <svg className="kairos-logo" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+      <path className="kairos-logo-core" d="M32 10 L48 32 L32 54 L16 32 Z" strokeLinejoin="round" />
+      <path className="kairos-logo-orbit" d="M12 32 C12 12, 52 12, 52 32" />
+      <path className="kairos-logo-hand" d="M32 54 L44 40" strokeLinecap="round" />
+      <circle className="kairos-logo-dot" cx="52" cy="32" r="3" />
     </svg>
   );
 }
@@ -143,11 +142,11 @@ export default function AppShell({ ws, children }) {
 
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="sidebar-logo">
-          <div className="brand-mark" aria-label="Chronos">
-            <ChronosLogo />
+          <div className="brand-mark" aria-label="Kairos">
+            <KairosLogo />
           </div>
           <div>
-            <h1>Chronos</h1>
+            <h1>Kairos</h1>
             <div className="tag">Temporal Signal OS</div>
           </div>
         </div>
@@ -187,8 +186,8 @@ export default function AppShell({ ws, children }) {
 
       <header className="mobile-topbar">
         <div className="mobile-brand">
-          <span className="brand-mark" aria-label="Chronos"><ChronosLogo /></span>
-          <span>Chronos</span>
+          <span className="brand-mark" aria-label="Kairos"><KairosLogo /></span>
+          <span>Kairos</span>
         </div>
         <ConnectionStatus connected={ws.connected} compact />
       </header>
