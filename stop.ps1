@@ -1,5 +1,5 @@
 # ================================================
-# CryptoSignals Platform - STOP
+# Chronos Platform - STOP
 # Kills all backend and frontend processes
 # ================================================
 
@@ -7,7 +7,7 @@ $ErrorActionPreference = "SilentlyContinue"
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ""
-Write-Host "  Stopping CryptoSignals Platform..." -ForegroundColor Yellow
+Write-Host "  Stopping Chronos Platform..." -ForegroundColor Yellow
 Write-Host ""
 
 # Step 1: Kill by saved PIDs

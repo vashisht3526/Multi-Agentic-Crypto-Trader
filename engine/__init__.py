@@ -1,10 +1,10 @@
 """
-CryptoSignals Engine — Core trading system package.
+Chronos Engine - Core trading system package.
 
 Subpackages:
-    engine.analysis  — Technical analysis (ATR, ADX, NOFI, multi-TF)
-    engine.data      — Market data ingestion (Binance WebSocket + REST)
-    engine.agents    — LLM advisory agents (TrendStrategist, RiskEngine)
+    engine.analysis  - Technical analysis (ATR, ADX, NOFI, multi-TF)
+    engine.data      - Market data ingestion (Binance WebSocket + REST)
+    engine.agents    - LLM advisory agents (TrendStrategist, RiskEngine)
 """
 
 from engine.database import FastTickDatabase

@@ -1,5 +1,5 @@
 # ================================================
-# CryptoSignals Platform - START
+# Chronos Platform - START
 # Launches backend (pipeline + API) and frontend
 # ================================================
 
@@ -8,7 +8,7 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ""
 Write-Host "  ========================================" -ForegroundColor Cyan
-Write-Host "   CryptoSignals - AI Trading Platform" -ForegroundColor Cyan
+Write-Host "   Chronos - Temporal Signal OS" -ForegroundColor Cyan
 Write-Host "  ========================================" -ForegroundColor Cyan
 Write-Host ""
 

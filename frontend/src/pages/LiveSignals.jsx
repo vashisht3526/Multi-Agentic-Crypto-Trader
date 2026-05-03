@@ -54,12 +54,11 @@ export default function LiveSignals({ ws }) {
 
   // Prefer WS data if available
   const signals = ws?.data?.active_signals?.length ? ws.data.active_signals : (apiSignals || []);
-  const price = ws?.data?.last_price;
 
   if (loading && !signals.length) {
     return (
       <div>
-        <div className="page-header"><h2>Live Signals</h2><p>Loading active signals...</p></div>
+        <div className="page-header"><h2>Live Signals</h2></div>
         <div className="signal-grid">{[...Array(3)].map((_, i) => <div key={i} className="card"><div className="skeleton" style={{ height: 140 }}></div></div>)}</div>
       </div>
     );
@@ -70,7 +69,6 @@ export default function LiveSignals({ ws }) {
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
         <div>
           <h2>Live Signals</h2>
-          <p>{signals.length} active signal{signals.length !== 1 ? 's' : ''} {price ? `— BTC $${formatPrice(price)}` : ''}</p>
         </div>
         {signals.length > 0 && (
           <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -84,7 +82,7 @@ export default function LiveSignals({ ws }) {
       {signals.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
           <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>◌</div>
-          <div style={{ color: 'var(--text-secondary)' }}>No active signals right now. The AI agents are analyzing the market.</div>
+          <div style={{ color: 'var(--text-secondary)' }}>No active signals.</div>
         </div>
       ) : (
         <div className="signal-grid">

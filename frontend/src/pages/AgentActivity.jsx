@@ -45,7 +45,6 @@ export default function AgentActivity() {
           {/* Grouped by crew run */}
           {runIds.slice(0, 20).map(runId => {
             const runEvents = grouped[runId];
-            const firstEvent = runEvents[runEvents.length - 1];
             const lastEvent = runEvents[0];
             return (
               <div key={runId} className="card" style={{ marginBottom: '1rem' }}>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { useNavigate } from 'react-router-dom';
 
@@ -80,28 +80,28 @@ const stickyThStyle = {
   position: 'sticky',
   right: 0,
   zIndex: 3,
-  background: 'var(--bg-card, #141e2e)',
-  borderLeft: '2px solid var(--accent-cyan)',
+  background: 'rgba(10, 12, 16, 0.98)',
+  borderLeft: '1px solid rgba(42, 217, 236, 0.36)',
   fontWeight: 700,
   fontSize: '0.95rem',
   padding: '0.65rem 1rem',
   whiteSpace: 'nowrap',
-  boxShadow: '-4px 0 12px rgba(0,0,0,0.3)',
+  boxShadow: '-12px 0 28px rgba(0,0,0,0.34)',
 };
 
 const stickyTdStyle = {
   position: 'sticky',
   right: 0,
   zIndex: 2,
-  background: 'var(--bg-card, #141e2e)',
-  borderLeft: '2px solid rgba(0, 212, 170, 0.25)',
+  background: 'rgba(10, 12, 16, 0.98)',
+  borderLeft: '1px solid rgba(42, 217, 236, 0.24)',
   fontFamily: 'var(--font-mono, monospace)',
   fontWeight: 700,
   fontSize: '1.05rem',
   textAlign: 'right',
   whiteSpace: 'nowrap',
   padding: '0.6rem 1rem',
-  boxShadow: '-4px 0 12px rgba(0,0,0,0.25)',
+  boxShadow: '-12px 0 28px rgba(0,0,0,0.28)',
 };
 
 export default function SignalHistory() {
@@ -126,8 +126,6 @@ export default function SignalHistory() {
   const totalPages = Math.ceil(totalCount / pageSize);
   const currentPrice = account?.current_price || 0;
 
-  useEffect(() => { setPage(0); }, [statusFilter, sideFilter]);
-
   const filtered = statusFilter === 'LIVE'
     ? signals.filter(s => (s.status || '').toUpperCase() === 'OPEN')
     : signals;
@@ -141,7 +139,6 @@ export default function SignalHistory() {
     <div>
       <div className="page-header">
         <h2>Signal History</h2>
-        <p>{totalCount} total signal{totalCount !== 1 ? 's' : ''} — real-time dollar tracking</p>
       </div>
 
       {/* KPI Summary */}
@@ -170,7 +167,6 @@ export default function SignalHistory() {
         <div className="kpi-card accent-purple">
           <div className="kpi-label">Equity</div>
           <div className="kpi-value" style={{ fontSize: '1.3rem' }}>${formatPrice(acc.current_equity)}</div>
-          <div className="kpi-note">Simulated portfolio</div>
         </div>
       </div>
 
@@ -180,14 +176,14 @@ export default function SignalHistory() {
           <span style={{ fontSize: '0.8rem', opacity: 0.6, marginRight: '0.5rem' }}>Status:</span>
           {STATUS_FILTERS.map(f => (
             <button key={f} className={`filter-btn ${statusFilter === f ? 'active' : ''}`}
-              onClick={() => setStatusFilter(f)}>{f}</button>
+              onClick={() => { setStatusFilter(f); setPage(0); }}>{f}</button>
           ))}
         </div>
         <div className="filter-bar">
           <span style={{ fontSize: '0.8rem', opacity: 0.6, marginRight: '0.5rem' }}>Side:</span>
           {SIDE_FILTERS.map(f => (
             <button key={f} className={`filter-btn ${sideFilter === f ? 'active' : ''}`}
-              onClick={() => setSideFilter(f)}>{f}</button>
+              onClick={() => { setSideFilter(f); setPage(0); }}>{f}</button>
           ))}
         </div>
       </div>
@@ -201,7 +197,7 @@ export default function SignalHistory() {
       ) : (
         <>
           <div className="table-container" style={{ overflowX: 'auto', position: 'relative' }}>
-            <table style={{ fontSize: '0.92rem', minWidth: '900px' }}>
+            <table style={{ fontSize: '0.92rem', minWidth: '1280px' }}>
               <thead>
                 <tr>
                   <th style={{ padding: '0.65rem 0.7rem', whiteSpace: 'nowrap' }}>Time</th>
@@ -214,7 +210,6 @@ export default function SignalHistory() {
                   <th style={{ padding: '0.65rem 0.7rem' }}>Reason</th>
                   <th style={{ padding: '0.65rem 0.7rem' }}>Net %</th>
                   {/* ═══ STICKY P&L COLUMN ═══ */}
-                  <th style={stickyThStyle}>P&L $</th>
                   {/* ─── Scroll-right columns ─── */}
                   <th style={{ padding: '0.65rem 0.7rem', opacity: 0.6 }}>MFE</th>
                   <th style={{ padding: '0.65rem 0.7rem', opacity: 0.6 }}>MAE</th>
@@ -222,6 +217,7 @@ export default function SignalHistory() {
                   <th style={{ padding: '0.65rem 0.7rem', opacity: 0.6 }}>Session</th>
                   <th style={{ padding: '0.65rem 0.7rem', opacity: 0.6 }}>Duration</th>
                   <th style={{ padding: '0.65rem 0.7rem', opacity: 0.6 }}>Signal</th>
+                  <th style={stickyThStyle}>P&L $</th>
                 </tr>
               </thead>
               <tbody>
@@ -299,10 +295,6 @@ export default function SignalHistory() {
                       </td>
 
                       {/* ═══ STICKY P&L $ ═══ */}
-                      <td style={{ ...stickyTdStyle, color: pnlColor, background: isActive ? 'rgba(0, 30, 46, 0.98)' : 'var(--bg-card, #141e2e)' }}>
-                        {isActive && <span style={{ fontSize: '0.58rem', opacity: 0.8, marginRight: '4px', verticalAlign: 'super', color: 'var(--accent-cyan)' }}>LIVE</span>}
-                        {formatDollar(dollarPnl)}
-                      </td>
 
                       {/* ─── Scroll-right columns ─── */}
                       <td style={{ ...mono, color: 'var(--bull)', opacity: 0.8 }}>{mfe !== 0 ? formatPct(mfe) : '—'}</td>
@@ -317,6 +309,10 @@ export default function SignalHistory() {
                       <td style={{ ...cell, opacity: 0.6 }}>{sig.session_tag || '—'}</td>
                       <td style={{ ...cell, opacity: 0.6, whiteSpace: 'nowrap' }}>{formatDuration(sig.generated_at, sig.closed_at)}</td>
                       <td style={{ ...mono, color: 'var(--accent-cyan)', opacity: 0.5, fontSize: '0.82rem' }}>{sig.signal_id?.slice(0, 8)}</td>
+                      <td style={{ ...stickyTdStyle, color: pnlColor, background: isActive ? 'rgba(5, 28, 33, 0.98)' : 'rgba(10, 12, 16, 0.98)' }}>
+                        {isActive && <span style={{ fontSize: '0.58rem', opacity: 0.8, marginRight: '4px', verticalAlign: 'super', color: 'var(--accent-cyan)' }}>LIVE</span>}
+                        {formatDollar(dollarPnl)}
+                      </td>
                     </tr>
                   );
                 })}

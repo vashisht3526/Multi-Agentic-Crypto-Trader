@@ -20,7 +20,7 @@ const LOOKBACK_OPTIONS = [
 
 export default function Performance() {
   const [lookback, setLookback] = useState(0);
-  const { data: summary, loading: loadingSummary } = useApi(
+  const { data: summary } = useApi(
     `/api/performance/summary?lookback_days=${lookback}`, 15000
   );
   const { data: curveData, loading: loadingCurve } = useApi(
@@ -29,7 +29,6 @@ export default function Performance() {
   const { data: sessionData } = useApi('/api/performance/by-session', 30000);
   const { data: monthlyData } = useApi('/api/performance/monthly-breakdown', 30000);
   const { data: missedData } = useApi('/api/signals/missed-profit?limit=10', 30000);
-  const { data: configData } = useApi('/api/system/config', 60000);
   const { data: regimeData } = useApi('/api/performance/regime-breakdown', 30000);
 
   const perf = summary || {};
@@ -37,7 +36,6 @@ export default function Performance() {
   const sessions = sessionData || [];
   const monthly = monthlyData || [];
   const missed = missedData || [];
-  const config = configData || {};
   const regimes = (regimeData || []).filter(r => !r.error);
 
   const totalNet = perf.total_net_pnl_percent || 0;
@@ -56,7 +54,6 @@ export default function Performance() {
     <div>
       <div className="page-header">
         <h2>Performance Analytics</h2>
-        <p>Fee-aware performance with regime analysis — Fees: {config.round_trip_fee_pct || 0.09}% round-trip</p>
       </div>
 
       {/* Timeframe Selector */}
@@ -92,7 +89,6 @@ export default function Performance() {
           <div className="kpi-value" style={{ color: expectancy >= 0 ? 'var(--bull)' : 'var(--bear)' }}>
             {formatPct(expectancy * 100, 4)}
           </div>
-          <div className="kpi-note">(WR × AvgWin) − (LR × AvgLoss)</div>
         </div>
         <div className="kpi-card accent-purple">
           <div className="kpi-label">Max Drawdown</div>
